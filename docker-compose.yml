@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  cockroachdb:
+    image: cockroachdb/cockroach:v23.1.11
+    command: start-single-node --insecure --store=attrs=ssd,path=/var/lib/cockroach/
+    restart: "no"
+    ports:
+      - "26257:26257"
+      - "8080:8080"
+    environment:
+      COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING: "true"
+    volumes:
+      - ./cockroach-data/cockroach:/cockroach/cockroach-data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health?ready=1"]
+      interval: "10s"
+      timeout: "3s"
+      retries: 5
+      start_period: "15s"
+
+  cockroachdb-init:
+    image: cockroachdb/cockroach:v23.1.11
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+    command: >
+      /bin/bash -c "
+      /cockroach/cockroach sql --insecure --host=cockroachdb:26257 <<-EOSQL
+        CREATE DATABASE IF NOT EXISTS mini_ledger;
+        USE mini_ledger;
+        CREATE TABLE IF NOT EXISTS accounts (
+            id SERIAL PRIMARY KEY,
+            account_number STRING NOT NULL UNIQUE,
+            balance DECIMAL(15,2) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS holdings (
+            id SERIAL PRIMARY KEY,
+            account_id INT NOT NULL REFERENCES accounts(id),
+            stock_code STRING NOT NULL,
+            quantity INT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(account_id, stock_code)
+        );
+        CREATE TABLE IF NOT EXISTS orders (
+            id SERIAL PRIMARY KEY,
+            account_id INT NOT NULL REFERENCES accounts(id),
+            stock_code STRING NOT NULL,
+            type STRING NOT NULL,
+            direction STRING NOT NULL,
+            quantity INT NOT NULL,
+            price DECIMAL(15,2),
+            filled_quantity INT NOT NULL DEFAULT 0,
+            status STRING NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        INSERT INTO accounts (id, account_number, balance) VALUES (1, 'AC001', 1000000) ON CONFLICT (id) DO NOTHING;
+        INSERT INTO holdings (account_id, stock_code, quantity) VALUES (1, 'STOCK01', 100) ON CONFLICT (account_id, stock_code) DO NOTHING;
+      EOSQL
+      "
+    restart: "no"
+
+  mini-ledger:
+    build: .
+    ports:
+      - "8081:8080"
+    environment:
+      - DATABASE_URL=postgresql://root@cockroachdb:26257/mini_ledger?sslmode=disable
+      - HTTP_PORT=8080
+    depends_on:
+      - cockroachdb-init
+    restart: unless-stopped
